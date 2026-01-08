@@ -1,7 +1,8 @@
 streamlit 
 pandas 
 numpy 
-scipy scikit-learn 
+scipy 
+scikit-learn 
 statsmodels
 fredapi 
 plotly 
