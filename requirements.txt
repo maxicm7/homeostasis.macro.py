@@ -7,4 +7,5 @@ fredapi
 plotly 
 openpyxl 
 yfinance
-tensorflow keras
+tensorflow 
+keras
