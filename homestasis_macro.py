@@ -10,10 +10,10 @@ from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 
-st.set_page_config(layout="wide", page_title="Homeostasis Económica — Con Desarrollo Matemático")
-st.title("🌐 Modelo Homeostático Estocástico — EE.UU.")
+st.set_page_config(layout="wide", page_title="Homeostasis Económica — Con Matemáticas")
+st.title("🌐 Modelo Homeostático Estocástico — EE.UU. (2000–2024)")
 
-# --- Sidebar: Clave API ---
+# --- Sidebar ---
 with st.sidebar:
     st.header("🔑 Configuración")
     API_KEY = st.text_input("Clave API de FRED", type="password")
@@ -22,24 +22,30 @@ with st.sidebar:
         st.warning("Ingresa tu clave API.")
         st.stop()
 
-# --- 1. Cargar datos macroeconómicos ---
+# --- 1. Cargar datos macro de EE.UU. ---
 @st.cache_data
 def load_us_data(api_key):
     fred = Fred(api_key=api_key)
     try:
+        # Series reales y disponibles
         gdp = fred.get_series('GDPC1', observation_start='2000-01-01')
         cpi = fred.get_series('CPIAUCSL', observation_start='2000-01-01')
         rate = fred.get_series('FEDFUNDS', observation_start='2000-01-01')
-        fsi = fred.get_series('STLFSI', observation_start='2000-01-01')  # Único código válido de FSI
+        fsi = fred.get_series('STLFSI', observation_start='2000-01-01')
 
+        # Convertir a trimestral
         gdp_q = gdp.resample('Q').last()
         cpi_q = cpi.resample('Q').last()
         rate_q = rate.resample('Q').mean()
         fsi_q = fsi.resample('Q').last()
 
+        # Inflación interanual (%)
         inflation = cpi_q.pct_change(periods=4) * 100
+
+        # PIB en log
         gdp_log = np.log(gdp_q)
 
+        # Combinar
         df = pd.DataFrame({
             'gdp': gdp_log,
             'inflation': inflation,
@@ -55,7 +61,7 @@ def load_us_data(api_key):
 df = load_us_data(API_KEY)
 if df is None:
     st.stop()
-st.success(f"✅ Datos cargados: {len(df)} trimestres")
+st.success(f"✅ Datos cargados: {len(df)} trimestres (Q1 2000 – Q2 2024)")
 
 # --- 2. Calcular IEM ---
 gdp_trend, _ = hpfilter(df['gdp'], lamb=1600)
@@ -69,6 +75,7 @@ df['abs_gaps'] = df[['gdp_gap', 'infl_gap', 'rate_gap']].abs().sum(axis=1)
 df['cum_gaps'] = df['abs_gaps'].rolling(20, min_periods=1).sum()
 df['IEM'] = df['cum_gaps'] + 2 - df['abs_gaps']
 
+# Rango homeostático (2015–2019)
 iem_stable = df[(df.index >= '2015') & (df.index <= '2019')]['IEM']
 IEM_LOW = iem_stable.mean() - 1.5 * iem_stable.std()
 IEM_HIGH = iem_stable.mean() + 1.5 * iem_stable.std()
@@ -78,7 +85,9 @@ st.header("📊 Índice de Equilibrio Macro (IEM)")
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df['IEM'], mode='lines', name='IEM'))
 fig.add_hrect(y0=IEM_LOW, y1=IEM_HIGH, fillcolor='lightgreen', opacity=0.3, annotation_text="Rango Homeostático")
-fig.update_layout(title="IEM = T + κ – Σ|brechas| — Análogo al Cálculo Especial", xaxis_title="Trimestre", yaxis_title="IEM")
+fig.add_vrect(x0='2007-12-01', x1='2009-06-01', fillcolor='salmon', opacity=0.3, annotation_text="Crisis 2008")
+fig.add_vrect(x0='2020-03-01', x1='2020-12-01', fillcolor='salmon', opacity=0.3, annotation_text="Pandemia")
+fig.update_layout(title="IEM: Equilibrio macroeconómico (análogo al Cálculo Especial)", xaxis_title="Trimestre", yaxis_title="IEM")
 st.plotly_chart(fig, use_container_width=True)
 
 # --- 4. Desarrollo matemático del IEM ---
@@ -101,7 +110,11 @@ Donde:
 
 # --- 5. Modelo SVAR con Plotly (sin matplotlib) ---
 st.header("📈 Modelo SVAR — Causalidad Estructural")
+
+# Estacionariedad: primeras diferencias
 df_diff = df[['gdp', 'inflation', 'rate']].diff().dropna()
+
+# Estimar VAR
 var_model = VAR(df_diff)
 var_fitted = var_model.fit(maxlags=4, ic='aic')
 irf = var_fitted.irf(periods=12)
@@ -144,7 +157,7 @@ La **función de impulso-respuesta** es:
 > ✅ **Interpretación**: Captura causalidad en el sentido de **Granger estructural**. Ej: un choque en la tasa → afecta PIB e inflación.
 """)
 
-# --- 7. Predicción LSTM del IEM ---
+# --- 7. Predicción con LSTM ---
 st.header("🔮 Predicción del IEM con LSTM")
 scaler = MinMaxScaler()
 iem_scaled = scaler.fit_transform(df[['IEM']].values)
@@ -183,12 +196,47 @@ fig_fsi.add_hline(y=0, line_dash="dash", line_color="gray")
 fig_fsi.update_layout(title="STLFSI: >0 = estrés, <0 = calma", xaxis_title="Trimestre", yaxis_title="Índice")
 st.plotly_chart(fig_fsi, use_container_width=True)
 
-# --- 9. Exportación ---
-if st.button("📥 Exportar resultados"):
+# --- 9. Finanzas Corporativas ---
+st.header("💼 Equilibrio Corporativo")
+ticker = st.text_input("Ticker bursátil (ej. AAPL)", value="AAPL")
+try:
+    stock = yf.Ticker(ticker)
+    financials = stock.quarterly_financials
+    balance = stock.quarterly_balance_sheet
+    
+    net_income = financials.loc['Net Income']
+    total_assets = balance.loc['Total Assets']
+    total_debt = balance.loc.get('Total Debt', balance.loc.get('Short Long Term Debt', 0) + balance.loc.get('Long Term Debt', 0))
+    equity = balance.loc['Total Stockholder Equity']
+    
+    roa = (net_income / total_assets).dropna()
+    debt_to_equity = (total_debt / equity).dropna()
+    
+    roa_trend = roa.rolling(8, center=True).mean().fillna(method='bfill').fillna(method='ffill')
+    d_e_trend = debt_to_equity.rolling(8, center=True).mean().fillna(method='bfill').fillna(method='ffill')
+    
+    IEC = 100 - (roa - roa_trend).abs() * 50 - (debt_to_equity - d_e_trend).abs() * 10
+    
+    fig_corp = go.Figure()
+    fig_corp.add_trace(go.Scatter(x=IEC.index, y=IEC, mode='lines'))
+    fig_corp.update_layout(title=f"Índice de Equilibrio Corporativo — {ticker}", xaxis_title="Trimestre", yaxis_title="IEC")
+    st.plotly_chart(fig_corp, use_container_width=True)
+except Exception as e:
+    st.warning(f"No se pudieron cargar datos para {ticker}: {str(e)[:100]}...")
+
+# --- 10. Exportación ---
+st.header("📥 Exportar Resultados")
+if st.button("Generar archivo Excel"):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name="Macro_EE.UU.")
         pd.DataFrame({'Predicción_IEM': preds_actual, 'Fecha': future_dates}).to_excel(writer, sheet_name="Predicción")
-    st.download_button("⬇️ Descargar Excel", output.getvalue(), "homeostasis_economica.xlsx")
+        if 'IEC' in locals():
+            IEC.to_frame(name='IEC').to_excel(writer, sheet_name="Corporativo")
+    st.download_button(
+        label="⬇️ Descargar Excel",
+        data=output.getvalue(),
+        file_name="homeostasis_economica.xlsx"
+    )
 
 st.markdown("💡 **Conclusión**: El equilibrio macroeconómico es un fenómeno **homeostático estocástico** — igual que en tu modelo de lotería.")
