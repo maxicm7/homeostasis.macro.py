@@ -10,28 +10,28 @@ from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 
-st.set_page_config(layout="wide", page_title="Homeostasis Económica — Con Matemáticas")
+st.set_page_config(layout="wide", page_title="Homeostasis Económica — Versión Final")
 st.title("🌐 Modelo Homeostático Estocástico — EE.UU. (2000–2024)")
 
-# --- Sidebar ---
+# --- Sidebar: Clave API ---
 with st.sidebar:
     st.header("🔑 Configuración")
     API_KEY = st.text_input("Clave API de FRED", type="password")
     st.markdown("[Obtener clave gratis](https://fred.stlouisfed.org/docs/api/api_key.html)")
     if not API_KEY:
-        st.warning("Ingresa tu clave API.")
+        st.warning("Por favor, ingresa tu clave API de FRED.")
         st.stop()
 
-# --- 1. Cargar datos macro de EE.UU. ---
+# --- 1. Cargar datos macroeconómicos de EE.UU. ---
 @st.cache_data
 def load_us_data(api_key):
     fred = Fred(api_key=api_key)
     try:
-        # Series reales y disponibles
+        # Cargar series reales y disponibles en FRED
         gdp = fred.get_series('GDPC1', observation_start='2000-01-01')
         cpi = fred.get_series('CPIAUCSL', observation_start='2000-01-01')
         rate = fred.get_series('FEDFUNDS', observation_start='2000-01-01')
-        fsi = fred.get_series('STLFSI', observation_start='2000-01-01')
+        fsi = fred.get_series('STLFSI', observation_start='2000-01-01')  # Índice de Estrés Financiero
 
         # Convertir a trimestral
         gdp_q = gdp.resample('Q').last()
@@ -39,13 +39,11 @@ def load_us_data(api_key):
         rate_q = rate.resample('Q').mean()
         fsi_q = fsi.resample('Q').last()
 
-        # Inflación interanual (%)
+        # Calcular inflación interanual (%)
         inflation = cpi_q.pct_change(periods=4) * 100
-
-        # PIB en log
         gdp_log = np.log(gdp_q)
 
-        # Combinar
+        # Crear DataFrame
         df = pd.DataFrame({
             'gdp': gdp_log,
             'inflation': inflation,
@@ -55,15 +53,17 @@ def load_us_data(api_key):
 
         return df
     except Exception as e:
-        st.error(f"Error al cargar datos: {e}")
+        st.error(f"❌ Error al cargar datos de FRED: {e}")
+        st.markdown("💡 Asegúrate de que tu clave API sea correcta.")
         return None
 
+# --- Cargar y validar datos ---
 df = load_us_data(API_KEY)
 if df is None:
     st.stop()
 st.success(f"✅ Datos cargados: {len(df)} trimestres (Q1 2000 – Q2 2024)")
 
-# --- 2. Calcular IEM ---
+# --- 2. Calcular Índice de Equilibrio Macro (IEM) ---
 gdp_trend, _ = hpfilter(df['gdp'], lamb=1600)
 infl_trend = df['inflation'].rolling(8, center=True).mean().fillna(method='bfill').fillna(method='ffill')
 rate_trend = df['rate'].rolling(8, center=True).mean().fillna(method='bfill').fillna(method='ffill')
@@ -75,7 +75,7 @@ df['abs_gaps'] = df[['gdp_gap', 'infl_gap', 'rate_gap']].abs().sum(axis=1)
 df['cum_gaps'] = df['abs_gaps'].rolling(20, min_periods=1).sum()
 df['IEM'] = df['cum_gaps'] + 2 - df['abs_gaps']
 
-# Rango homeostático (2015–2019)
+# Rango homeostático (período estable 2015–2019)
 iem_stable = df[(df.index >= '2015') & (df.index <= '2019')]['IEM']
 IEM_LOW = iem_stable.mean() - 1.5 * iem_stable.std()
 IEM_HIGH = iem_stable.mean() + 1.5 * iem_stable.std()
@@ -111,15 +111,11 @@ Donde:
 # --- 5. Modelo SVAR con Plotly (sin matplotlib) ---
 st.header("📈 Modelo SVAR — Causalidad Estructural")
 
-# Estacionariedad: primeras diferencias
 df_diff = df[['gdp', 'inflation', 'rate']].diff().dropna()
-
-# Estimar VAR
 var_model = VAR(df_diff)
 var_fitted = var_model.fit(maxlags=4, ic='aic')
 irf = var_fitted.irf(periods=12)
 
-# Extraer IRF para Plotly
 variables = ['gdp', 'inflation', 'rate']
 fig_svar = go.Figure()
 for i, shock in enumerate(variables):
@@ -157,10 +153,14 @@ La **función de impulso-respuesta** es:
 > ✅ **Interpretación**: Captura causalidad en el sentido de **Granger estructural**. Ej: un choque en la tasa → afecta PIB e inflación.
 """)
 
-# --- 7. Predicción con LSTM ---
+# --- 7. Predicción con LSTM (¡CORREGIDO!) ---
 st.header("🔮 Predicción del IEM con LSTM")
+
+# Preparar datos
 scaler = MinMaxScaler()
 iem_scaled = scaler.fit_transform(df[['IEM']].values)
+
+# Crear secuencias de 8 trimestres
 X, y = [], []
 for i in range(8, len(iem_scaled)):
     X.append(iem_scaled[i-8:i, 0])
@@ -168,20 +168,31 @@ for i in range(8, len(iem_scaled)):
 X, y = np.array(X), np.array(y)
 X = X.reshape((X.shape[0], X.shape[1], 1))
 
-model = Sequential([LSTM(50, return_sequences=True, input_shape=(8,1)), LSTM(50), Dense(1)])
+# Modelo LSTM
+model = Sequential([
+    LSTM(50, return_sequences=True, input_shape=(X.shape[1], 1)),
+    LSTM(50),
+    Dense(1)
+])
 model.compile(optimizer='adam', loss='mse')
 model.fit(X, y, epochs=10, verbose=0)
 
+# Predecir los próximos 4 trimestres
 last_seq = iem_scaled[-8:].reshape((1, 8, 1))
 preds = []
 for _ in range(4):
     pred = model.predict(last_seq, verbose=0)
-    preds.append(pred[0, 0])
-    last_seq = np.append(last_seq[:, 1:, :], [[pred[0, 0]]], axis=1)
+    # ✅ CORRECCIÓN CLAVE: usar .item() para obtener un escalar
+    pred_value = pred.item()
+    preds.append(pred_value)
+    # Añadir a la secuencia (manteniendo forma (1,8,1))
+    last_seq = np.append(last_seq[:, 1:, :], [[[pred_value]]], axis=1)
 
+# Desescalar predicciones
 preds_actual = scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
 future_dates = pd.date_range(df.index[-1], periods=5, freq='Q')[1:]
 
+# Mostrar gráfico
 fig_lstm = go.Figure()
 fig_lstm.add_trace(go.Scatter(x=df.index, y=df['IEM'], mode='lines', name='Histórico'))
 fig_lstm.add_trace(go.Scatter(x=future_dates, y=preds_actual, mode='markers+lines', name='Predicción'))
@@ -191,15 +202,16 @@ st.plotly_chart(fig_lstm, use_container_width=True)
 # --- 8. Índice de Estrés Financiero (STLFSI) ---
 st.header("⚠️ Índice de Estrés Financiero (STLFSI)")
 fig_fsi = go.Figure()
-fig_fsi.add_trace(go.Scatter(x=df.index, y=df['fsi'], mode='lines'))
+fig_fsi.add_trace(go.Scatter(x=df.index, y=df['fsi'], mode='lines', name='STLFSI'))
 fig_fsi.add_hline(y=0, line_dash="dash", line_color="gray")
-fig_fsi.update_layout(title="STLFSI: >0 = estrés, <0 = calma", xaxis_title="Trimestre", yaxis_title="Índice")
+fig_fsi.update_layout(title="STLFSI: Valores >0 indican estrés financiero", xaxis_title="Trimestre", yaxis_title="Índice")
 st.plotly_chart(fig_fsi, use_container_width=True)
 
 # --- 9. Finanzas Corporativas ---
 st.header("💼 Equilibrio Corporativo")
-ticker = st.text_input("Ticker bursátil (ej. AAPL)", value="AAPL")
+ticker = st.text_input("Ticker bursátil (ej. AAPL, MSFT)", value="AAPL")
 try:
+    import yfinance as yf
     stock = yf.Ticker(ticker)
     financials = stock.quarterly_financials
     balance = stock.quarterly_balance_sheet
@@ -218,7 +230,7 @@ try:
     IEC = 100 - (roa - roa_trend).abs() * 50 - (debt_to_equity - d_e_trend).abs() * 10
     
     fig_corp = go.Figure()
-    fig_corp.add_trace(go.Scatter(x=IEC.index, y=IEC, mode='lines'))
+    fig_corp.add_trace(go.Scatter(x=IEC.index, y=IEC, mode='lines', name='IEC'))
     fig_corp.update_layout(title=f"Índice de Equilibrio Corporativo — {ticker}", xaxis_title="Trimestre", yaxis_title="IEC")
     st.plotly_chart(fig_corp, use_container_width=True)
 except Exception as e:
@@ -226,7 +238,7 @@ except Exception as e:
 
 # --- 10. Exportación ---
 st.header("📥 Exportar Resultados")
-if st.button("Generar archivo Excel"):
+if st.button("Generar archivo Excel con todos los resultados"):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name="Macro_EE.UU.")
@@ -236,7 +248,8 @@ if st.button("Generar archivo Excel"):
     st.download_button(
         label="⬇️ Descargar Excel",
         data=output.getvalue(),
-        file_name="homeostasis_economica.xlsx"
+        file_name="homeostasis_economica_resultados.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 st.markdown("💡 **Conclusión**: El equilibrio macroeconómico es un fenómeno **homeostático estocástico** — igual que en tu modelo de lotería.")
